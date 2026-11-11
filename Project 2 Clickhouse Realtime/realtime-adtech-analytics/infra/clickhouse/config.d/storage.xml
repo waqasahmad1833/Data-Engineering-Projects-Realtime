@@ -1,0 +1,40 @@
+<!--
+  Hot/cold tiering. New parts land on local disk ("hot"); TTL rules in the
+  table DDL move parts older than N days to S3 ("cold"), fronted by a local
+  read cache. Locally S3 is MinIO; in production point CH_S3_ENDPOINT at a
+  real bucket (one prefix per replica).
+-->
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <s3_cold>
+                <type>s3</type>
+                <endpoint from_env="CH_S3_ENDPOINT"/>
+                <access_key_id from_env="MINIO_ROOT_USER"/>
+                <secret_access_key from_env="MINIO_ROOT_PASSWORD"/>
+                <metadata_path>/var/lib/clickhouse/disks/s3_cold/</metadata_path>
+            </s3_cold>
+            <s3_cold_cache>
+                <type>cache</type>
+                <disk>s3_cold</disk>
+                <path>/var/lib/clickhouse/disks/s3_cold_cache/</path>
+                <max_size>10737418240</max_size>
+            </s3_cold_cache>
+        </disks>
+        <policies>
+            <hot_cold>
+                <volumes>
+                    <hot>
+                        <disk>default</disk>
+                    </hot>
+                    <cold>
+                        <disk>s3_cold_cache</disk>
+                        <prefer_not_to_merge>true</prefer_not_to_merge>
+                    </cold>
+                </volumes>
+                <!-- start moving parts to cold when hot volume has <10% free space -->
+                <move_factor>0.1</move_factor>
+            </hot_cold>
+        </policies>
+    </storage_configuration>
+</clickhouse>

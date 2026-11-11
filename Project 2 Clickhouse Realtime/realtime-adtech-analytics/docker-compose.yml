@@ -1,0 +1,326 @@
+name: ${COMPOSE_PROJECT_NAME:-adtech}
+
+# ---------------------------------------------------------------------------
+# Local, scaled-down replica of the production topology:
+#   Kafka (KRaft) -> Flink (dedup, attribution join, spend windows)
+#   -> ClickHouse cluster: 2 shards x 2 replicas + Keeper, hot/cold tiering to MinIO (S3)
+#   Prometheus + Grafana for pipeline health and business dashboards.
+# Production sizing for 30+ TB/month lives in k8s/ and docs/capacity-planning.md.
+# ---------------------------------------------------------------------------
+
+x-clickhouse-node: &clickhouse-node
+  image: clickhouse/clickhouse-server:24.3
+  restart: unless-stopped
+  ulimits:
+    nofile:
+      soft: 262144
+      hard: 262144
+  depends_on:
+    clickhouse-keeper:
+      condition: service_started
+    minio-init:
+      condition: service_completed_successfully
+  healthcheck:
+    test: ["CMD-SHELL", "clickhouse-client --user adtech --password \"$$CH_PASSWORD\" --query 'SELECT 1'"]
+    interval: 10s
+    timeout: 5s
+    retries: 18
+
+x-flink-common: &flink-common
+  build:
+    context: ./flink-job
+  image: adtech-flink-job:latest
+  restart: unless-stopped
+
+x-flink-properties: &flink-properties |
+  jobmanager.rpc.address: flink-jobmanager
+  parallelism.default: ${FLINK_PARALLELISM:-4}
+  taskmanager.numberOfTaskSlots: 8
+  taskmanager.memory.process.size: 3072m
+  jobmanager.memory.process.size: 1024m
+  state.backend.type: rocksdb
+  state.backend.incremental: true
+  taskmanager.network.memory.buffer-debloat.enabled: true
+  state.checkpoints.dir: s3://flink/checkpoints
+  state.savepoints.dir: s3://flink/savepoints
+  s3.endpoint: http://minio:9000
+  s3.path.style.access: true
+  s3.access-key: ${MINIO_ROOT_USER:-minioadmin}
+  s3.secret-key: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+  metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+  metrics.reporter.prom.port: 9249
+
+services:
+  # ---------------------------------------------------------------- Kafka ---
+  kafka:
+    image: apache/kafka:3.7.1
+    hostname: kafka
+    ports:
+      - "29092:29092"
+    environment:
+      CLUSTER_ID: "Zm9vYmFyLWFkdGVjaC1rYWZrYQ"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_MESSAGE_MAX_BYTES: 10485760
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  kafka-init:
+    image: apache/kafka:3.7.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      EVENTS_PARTITIONS: 12
+    volumes:
+      - ./infra/kafka/create-topics.sh:/scripts/create-topics.sh:ro
+    entrypoint: ["sh", "/scripts/create-topics.sh"]
+    restart: "no"
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: adtech-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------- MinIO ---
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes:
+      - minio-data:/data
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do sleep 2; done &&
+      mc mb --ignore-existing local/clickhouse-cold &&
+      mc mb --ignore-existing local/flink &&
+      echo 'buckets ready'"
+    restart: "no"
+
+  # ----------------------------------------------------------- ClickHouse ---
+  clickhouse-keeper:
+    image: clickhouse/clickhouse-keeper:24.3
+    hostname: clickhouse-keeper
+    restart: unless-stopped
+    volumes:
+      - ./infra/clickhouse/keeper/keeper_config.xml:/etc/clickhouse-keeper/keeper_config.xml:ro
+      - keeper-data:/var/lib/clickhouse
+
+  ch-s1-r1:
+    <<: *clickhouse-node
+    hostname: ch-s1-r1
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CH_SHARD: "01"
+      CH_REPLICA: ch-s1-r1
+      CH_PASSWORD: ${CH_PASSWORD:-adtech_pwd}
+      CH_S3_ENDPOINT: http://minio:9000/clickhouse-cold/ch-s1-r1/
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes:
+      - ch-s1-r1-data:/var/lib/clickhouse
+      - ./infra/clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./infra/clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./infra/clickhouse/config.d/server.xml:/etc/clickhouse-server/config.d/server.xml:ro
+      - ./infra/clickhouse/users.d/adtech-users.xml:/etc/clickhouse-server/users.d/adtech-users.xml:ro
+
+  ch-s1-r2:
+    <<: *clickhouse-node
+    hostname: ch-s1-r2
+    environment:
+      CH_SHARD: "01"
+      CH_REPLICA: ch-s1-r2
+      CH_PASSWORD: ${CH_PASSWORD:-adtech_pwd}
+      CH_S3_ENDPOINT: http://minio:9000/clickhouse-cold/ch-s1-r2/
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes:
+      - ch-s1-r2-data:/var/lib/clickhouse
+      - ./infra/clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./infra/clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./infra/clickhouse/config.d/server.xml:/etc/clickhouse-server/config.d/server.xml:ro
+      - ./infra/clickhouse/users.d/adtech-users.xml:/etc/clickhouse-server/users.d/adtech-users.xml:ro
+
+  ch-s2-r1:
+    <<: *clickhouse-node
+    hostname: ch-s2-r1
+    environment:
+      CH_SHARD: "02"
+      CH_REPLICA: ch-s2-r1
+      CH_PASSWORD: ${CH_PASSWORD:-adtech_pwd}
+      CH_S3_ENDPOINT: http://minio:9000/clickhouse-cold/ch-s2-r1/
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes:
+      - ch-s2-r1-data:/var/lib/clickhouse
+      - ./infra/clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./infra/clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./infra/clickhouse/config.d/server.xml:/etc/clickhouse-server/config.d/server.xml:ro
+      - ./infra/clickhouse/users.d/adtech-users.xml:/etc/clickhouse-server/users.d/adtech-users.xml:ro
+
+  ch-s2-r2:
+    <<: *clickhouse-node
+    hostname: ch-s2-r2
+    environment:
+      CH_SHARD: "02"
+      CH_REPLICA: ch-s2-r2
+      CH_PASSWORD: ${CH_PASSWORD:-adtech_pwd}
+      CH_S3_ENDPOINT: http://minio:9000/clickhouse-cold/ch-s2-r2/
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    volumes:
+      - ch-s2-r2-data:/var/lib/clickhouse
+      - ./infra/clickhouse/config.d/cluster.xml:/etc/clickhouse-server/config.d/cluster.xml:ro
+      - ./infra/clickhouse/config.d/storage.xml:/etc/clickhouse-server/config.d/storage.xml:ro
+      - ./infra/clickhouse/config.d/server.xml:/etc/clickhouse-server/config.d/server.xml:ro
+      - ./infra/clickhouse/users.d/adtech-users.xml:/etc/clickhouse-server/users.d/adtech-users.xml:ro
+
+  clickhouse-init:
+    image: clickhouse/clickhouse-server:24.3
+    depends_on:
+      ch-s1-r1:
+        condition: service_healthy
+      ch-s1-r2:
+        condition: service_healthy
+      ch-s2-r1:
+        condition: service_healthy
+      ch-s2-r2:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      CH_HOST: ch-s1-r1
+      CH_PASSWORD: ${CH_PASSWORD:-adtech_pwd}
+    volumes:
+      - ./infra/clickhouse/schema:/schema:ro
+      - ./scripts/apply-schema.sh:/apply-schema.sh:ro
+    entrypoint: ["bash", "/apply-schema.sh"]
+    restart: "no"
+
+  # ---------------------------------------------------------------- Flink ---
+  flink-jobmanager:
+    <<: *flink-common
+    hostname: flink-jobmanager
+    command: standalone-job --job-classname com.example.adtech.AdAnalyticsJob
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: *flink-properties
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CLICKHOUSE_SHARDS: "http://ch-s1-r1:8123,http://ch-s1-r2:8123;http://ch-s2-r1:8123,http://ch-s2-r2:8123"
+      CLICKHOUSE_USER: adtech
+      CLICKHOUSE_PASSWORD: ${CH_PASSWORD:-adtech_pwd}
+      SINK_WRITERS_PER_SHARD: 1
+    depends_on:
+      clickhouse-init:
+        condition: service_completed_successfully
+
+  flink-taskmanager:
+    <<: *flink-common
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: *flink-properties
+    depends_on:
+      - flink-jobmanager
+
+  # ------------------------------------------------------------ Generator ---
+  generator:
+    build:
+      context: ./generator
+    image: adtech-generator:latest
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: ad.events
+      EVENTS_PER_SECOND: ${EVENTS_PER_SECOND:-2000}
+      GENERATOR_WORKERS: ${GENERATOR_WORKERS:-2}
+      DUPLICATE_RATIO: ${DUPLICATE_RATIO:-0.01}
+      INVALID_EVENT_RATIO: ${INVALID_EVENT_RATIO:-0.005}
+      LATE_EVENT_RATIO: ${LATE_EVENT_RATIO:-0.02}
+      MAX_LATE_SECONDS: 10
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+
+  # ----------------------------------------------------------- Monitoring ---
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.7.0
+    command: ["--kafka.server=kafka:9092"]
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    ports:
+      - "3000:3000"
+    environment:
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      CH_PASSWORD: ${CH_PASSWORD:-adtech_pwd}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - ch-s1-r1
+
+volumes:
+  kafka-data:
+  minio-data:
+  keeper-data:
+  ch-s1-r1-data:
+  ch-s1-r2-data:
+  ch-s2-r1-data:
+  ch-s2-r2-data:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,49 @@
+# 48 partitions = Flink source parallelism; ~600 events/s per partition at the 30k/s average.
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: ad-events
+  namespace: adtech
+  labels:
+    strimzi.io/cluster: adtech-kafka
+spec:
+  topicName: ad.events
+  partitions: 48
+  replicas: 3
+  config:
+    retention.ms: 259200000
+    compression.type: zstd
+    max.message.bytes: 10485760
+    min.insync.replicas: 2
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: ad-dlq
+  namespace: adtech
+  labels:
+    strimzi.io/cluster: adtech-kafka
+spec:
+  topicName: ad.dlq
+  partitions: 8
+  replicas: 3
+  config:
+    retention.ms: 1209600000
+    min.insync.replicas: 2
+---
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: campaign-spend
+  namespace: adtech
+  labels:
+    strimzi.io/cluster: adtech-kafka
+spec:
+  topicName: campaign.spend
+  partitions: 12
+  replicas: 3
+  config:
+    cleanup.policy: compact,delete
+    retention.ms: 172800000
+    min.cleanable.dirty.ratio: "0.1"
+    min.insync.replicas: 2

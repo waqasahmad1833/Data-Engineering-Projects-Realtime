@@ -1,0 +1,15 @@
+.env
+target/
+dependency-reduced-pom.xml
+*.class
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+.idea/
+*.iml
+.vscode/
+.DS_Store
+*.log

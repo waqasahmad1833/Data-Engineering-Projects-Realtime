@@ -1,0 +1,7 @@
+SELECT campaign_id, sum(impressions) AS imps, sum(clicks) AS clks, round(sum(spend_micros) / 1e6, 2) AS spend_usd, uniqCombined64Merge(unique_users) AS reach FROM adtech.campaign_stats_1m WHERE minute >= now() - INTERVAL 1 HOUR GROUP BY campaign_id ORDER BY spend_usd DESC LIMIT 20
+SELECT campaign_id, sum(spend) AS spent FROM (SELECT campaign_id, window_start, argMax(spend_micros, version) AS spend FROM adtech.campaign_spend_10s WHERE window_start >= toStartOfDay(now()) GROUP BY campaign_id, window_start) GROUP BY campaign_id ORDER BY spent DESC LIMIT 20
+SELECT frequency, count() AS users FROM (SELECT user_id, count() AS frequency FROM adtech.ad_events WHERE event_type = 'impression' AND event_time >= now() - INTERVAL 1 HOUR GROUP BY user_id) GROUP BY frequency ORDER BY frequency
+SELECT ad_format, countIf(event_type = 'bid') AS bids, countIf(event_type = 'impression') AS wins FROM adtech.ad_events WHERE event_time >= now() - INTERVAL 1 HOUR GROUP BY ad_format
+SELECT publisher_id, site_domain, toStartOfHour(event_time) AS hour, count() AS events, sum(win_price_micros) AS revenue FROM adtech.ad_events WHERE toStartOfHour(event_time) >= toStartOfHour(now() - INTERVAL 6 HOUR) GROUP BY publisher_id, site_domain, event_type, hour ORDER BY revenue DESC LIMIT 20
+SELECT device_type, quantiles(0.5, 0.9, 0.99)(time_to_click_ms) FROM adtech.attributed_clicks WHERE click_time >= now() - INTERVAL 1 DAY GROUP BY device_type
+SELECT count() FROM adtech.ad_events WHERE user_id = 1234567890123456789 AND event_time >= now() - INTERVAL 1 DAY

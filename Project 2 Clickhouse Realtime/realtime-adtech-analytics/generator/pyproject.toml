@@ -1,0 +1,9 @@
+[project]
+name = "adgen"
+version = "1.0.0"
+description = "High-throughput ad-tech event simulator (bids, impressions, clicks, conversions) for Kafka."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

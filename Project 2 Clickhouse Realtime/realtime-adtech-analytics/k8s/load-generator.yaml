@@ -1,0 +1,26 @@
+# Load test: 4 pods x 4 worker processes x 5,000 events/s = 80,000 events/s
+# (the designed peak, ~3x the 30 TB/month average). Not part of kustomization.yaml.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adtech-load-generator
+  namespace: adtech
+spec:
+  replicas: 4
+  selector:
+    matchLabels: {app: adtech-load-generator}
+  template:
+    metadata:
+      labels: {app: adtech-load-generator}
+    spec:
+      containers:
+        - name: generator
+          image: ghcr.io/CHANGE_ME/adtech-generator:1.0.0
+          env:
+            - {name: KAFKA_BOOTSTRAP_SERVERS, value: "adtech-kafka-kafka-bootstrap:9092"}
+            - {name: EVENTS_PER_SECOND, value: "20000"}
+            - {name: GENERATOR_WORKERS, value: "4"}
+            - {name: NUM_USERS, value: "50000000"}
+          resources:
+            requests: {cpu: "4", memory: 2Gi}
+            limits: {memory: 2Gi}

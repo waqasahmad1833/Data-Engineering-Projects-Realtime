@@ -1,0 +1,108 @@
+# ClickHouse: 4 shards x 2 replicas = 8 nodes (32 vCPU / 128 GiB / 2 TiB NVMe each)
+# + S3 cold tier. The operator generates remote_servers (cluster "adtech") and the
+# {shard}/{replica} macros, so the schema in infra/clickhouse/schema works unchanged.
+apiVersion: clickhouse.altinity.com/v1
+kind: ClickHouseInstallation
+metadata:
+  name: adtech
+  namespace: adtech
+spec:
+  defaults:
+    templates:
+      podTemplate: clickhouse
+      dataVolumeClaimTemplate: data
+  configuration:
+    zookeeper:
+      nodes:
+        - host: keeper-adtech-keeper
+          port: 2181
+    clusters:
+      - name: adtech
+        secret:
+          auto: "true"            # inter-server authentication for Distributed queries
+        layout:
+          shardsCount: 4
+          replicasCount: 2
+    users:
+      adtech/k8s_secret_password: clickhouse-credentials/password
+      adtech/networks/ip: "::/0"
+      adtech/profile: adtech_profile
+      dict_reader/password: ""
+      dict_reader/networks/ip: ["127.0.0.1", "::1"]
+      dict_reader/profile: readonly
+    profiles:
+      adtech_profile/max_memory_usage: "60000000000"
+      adtech_profile/max_execution_time: "120"
+      adtech_profile/optimize_distributed_group_by_sharding_key: "1"
+      adtech_profile/distributed_product_mode: local
+      adtech_profile/insert_deduplicate: "1"
+      adtech_profile/deduplicate_blocks_in_dependent_materialized_views: "1"
+      adtech_profile/date_time_input_format: best_effort
+    settings:
+      max_concurrent_queries: "300"
+      prometheus/endpoint: /metrics
+      prometheus/port: "9363"
+      prometheus/metrics: "true"
+      prometheus/events: "true"
+      prometheus/asynchronous_metrics: "true"
+      merge_tree/parts_to_delay_insert: "300"
+      merge_tree/parts_to_throw_insert: "600"
+    files:
+      config.d/storage.xml: |
+        <clickhouse>
+          <storage_configuration>
+            <disks>
+              <s3_cold>
+                <type>s3</type>
+                <!-- Objects get random keys, so replicas can share a prefix (no zero-copy replication). -->
+                <endpoint>https://CHANGE_ME-bucket.s3.CHANGE_ME-region.amazonaws.com/clickhouse/</endpoint>
+                <use_environment_credentials>true</use_environment_credentials>
+                <metadata_path>/var/lib/clickhouse/disks/s3_cold/</metadata_path>
+              </s3_cold>
+              <s3_cold_cache>
+                <type>cache</type>
+                <disk>s3_cold</disk>
+                <path>/var/lib/clickhouse/disks/s3_cold_cache/</path>
+                <max_size>214748364800</max_size>
+              </s3_cold_cache>
+            </disks>
+            <policies>
+              <hot_cold>
+                <volumes>
+                  <hot><disk>default</disk></hot>
+                  <cold>
+                    <disk>s3_cold_cache</disk>
+                    <prefer_not_to_merge>true</prefer_not_to_merge>
+                  </cold>
+                </volumes>
+                <move_factor>0.1</move_factor>
+              </hot_cold>
+            </policies>
+          </storage_configuration>
+        </clickhouse>
+  templates:
+    podTemplates:
+      - name: clickhouse
+        spec:
+          serviceAccountName: clickhouse
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      clickhouse.altinity.com/chi: adtech
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: clickhouse
+              image: clickhouse/clickhouse-server:24.3
+              resources:
+                requests: {cpu: "28", memory: 120Gi}
+                limits: {memory: 120Gi}
+    volumeClaimTemplates:
+      - name: data
+        spec:
+          storageClassName: CHANGE_ME-nvme   # local NVMe or io2-class volumes for the hot tier
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 2Ti

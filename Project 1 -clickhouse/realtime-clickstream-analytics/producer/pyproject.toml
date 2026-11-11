@@ -1,0 +1,9 @@
+[project]
+name = "clickstream-producer"
+version = "1.0.0"
+description = "Simulates realistic e-commerce clickstream traffic and publishes it to Kafka."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

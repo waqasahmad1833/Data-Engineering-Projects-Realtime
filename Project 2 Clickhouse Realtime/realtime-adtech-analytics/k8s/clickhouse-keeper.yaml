@@ -1,0 +1,43 @@
+# 3-node ClickHouse Keeper ensemble (Raft quorum survives one node loss).
+apiVersion: clickhouse-keeper.altinity.com/v1
+kind: ClickHouseKeeperInstallation
+metadata:
+  name: adtech-keeper
+  namespace: adtech
+spec:
+  configuration:
+    clusters:
+      - name: keeper
+        layout:
+          replicasCount: 3
+    settings:
+      logger/level: warning
+      keeper_server/coordination_settings/raft_logs_level: warning
+  defaults:
+    templates:
+      podTemplate: keeper
+      dataVolumeClaimTemplate: keeper-data
+  templates:
+    podTemplates:
+      - name: keeper
+        spec:
+          affinity:
+            podAntiAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      clickhouse-keeper.altinity.com/chk: adtech-keeper
+                  topologyKey: kubernetes.io/hostname
+          containers:
+            - name: clickhouse-keeper
+              image: clickhouse/clickhouse-keeper:24.3
+              resources:
+                requests: {cpu: "2", memory: 8Gi}
+                limits: {memory: 8Gi}
+    volumeClaimTemplates:
+      - name: keeper-data
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 50Gi

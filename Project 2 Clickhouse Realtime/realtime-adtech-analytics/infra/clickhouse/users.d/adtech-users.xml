@@ -1,0 +1,41 @@
+<clickhouse>
+    <profiles>
+        <adtech_profile>
+            <max_memory_usage>8000000000</max_memory_usage>
+            <max_execution_time>120</max_execution_time>
+            <use_uncompressed_cache>0</use_uncompressed_cache>
+            <!-- GROUP BY on the sharding key can be finished on each shard -->
+            <optimize_distributed_group_by_sharding_key>1</optimize_distributed_group_by_sharding_key>
+            <distributed_product_mode>local</distributed_product_mode>
+            <insert_deduplicate>1</insert_deduplicate>
+            <!-- a retried (deduplicated) insert must not be counted again by materialized views -->
+            <deduplicate_blocks_in_dependent_materialized_views>1</deduplicate_blocks_in_dependent_materialized_views>
+            <date_time_input_format>best_effort</date_time_input_format>
+        </adtech_profile>
+        <dictionary_profile>
+            <readonly>1</readonly>
+        </dictionary_profile>
+    </profiles>
+
+    <users>
+        <!-- Application user: Flink sinks, Grafana, scripts, inter-server queries -->
+        <adtech>
+            <password from_env="CH_PASSWORD"/>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>adtech_profile</profile>
+            <quota>default</quota>
+        </adtech>
+        <!-- Local-only, read-only user used by dictionaries to read dimension tables -->
+        <dict_reader>
+            <password></password>
+            <networks>
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
+            <profile>dictionary_profile</profile>
+            <quota>default</quota>
+        </dict_reader>
+    </users>
+</clickhouse>

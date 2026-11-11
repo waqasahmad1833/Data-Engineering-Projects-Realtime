@@ -1,0 +1,58 @@
+<!--
+  Cluster topology: 2 shards x 2 replicas (local). Every node reads its own
+  shard/replica macros from environment variables, so one file serves all nodes.
+-->
+<clickhouse>
+    <macros>
+        <cluster>adtech</cluster>
+        <shard from_env="CH_SHARD"/>
+        <replica from_env="CH_REPLICA"/>
+    </macros>
+
+    <remote_servers>
+        <adtech>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>ch-s1-r1</host>
+                    <port>9000</port>
+                    <user>adtech</user>
+                    <password from_env="CH_PASSWORD"/>
+                </replica>
+                <replica>
+                    <host>ch-s1-r2</host>
+                    <port>9000</port>
+                    <user>adtech</user>
+                    <password from_env="CH_PASSWORD"/>
+                </replica>
+            </shard>
+            <shard>
+                <internal_replication>true</internal_replication>
+                <replica>
+                    <host>ch-s2-r1</host>
+                    <port>9000</port>
+                    <user>adtech</user>
+                    <password from_env="CH_PASSWORD"/>
+                </replica>
+                <replica>
+                    <host>ch-s2-r2</host>
+                    <port>9000</port>
+                    <user>adtech</user>
+                    <password from_env="CH_PASSWORD"/>
+                </replica>
+            </shard>
+        </adtech>
+    </remote_servers>
+
+    <zookeeper>
+        <node>
+            <host>clickhouse-keeper</host>
+            <port>9181</port>
+        </node>
+        <session_timeout_ms>30000</session_timeout_ms>
+    </zookeeper>
+
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+</clickhouse>

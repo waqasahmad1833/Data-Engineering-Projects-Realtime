@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: adtech
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - kafka.yaml
+  - kafka-topics.yaml
+  - clickhouse-keeper.yaml
+  - clickhouse.yaml
+  - flink.yaml

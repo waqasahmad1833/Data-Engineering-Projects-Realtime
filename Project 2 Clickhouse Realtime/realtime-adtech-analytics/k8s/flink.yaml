@@ -1,0 +1,66 @@
+# Flink job in application mode via the Flink Kubernetes Operator.
+# 48 slots = 12 TaskManagers x 4 slots; source parallelism matches the 48 Kafka partitions.
+# ClickHouse sinks: 4 shards x 2 writers per shard = 8 writer subtasks.
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: adtech-stream
+  namespace: adtech
+spec:
+  image: ghcr.io/CHANGE_ME/adtech-flink-job:1.0.0
+  flinkVersion: v1_18
+  serviceAccount: flink
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "4"
+    state.backend.type: rocksdb
+    state.backend.incremental: "true"
+    state.backend.rocksdb.memory.managed: "true"
+    state.checkpoints.dir: s3://CHANGE_ME-bucket/flink/checkpoints
+    state.savepoints.dir: s3://CHANGE_ME-bucket/flink/savepoints
+    high-availability.type: kubernetes
+    high-availability.storageDir: s3://CHANGE_ME-bucket/flink/ha
+    taskmanager.network.memory.buffer-debloat.enabled: "true"
+    taskmanager.memory.managed.fraction: "0.45"
+    metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+    metrics.reporter.prom.port: "9249"
+    kubernetes.operator.periodic.savepoint.interval: 6h
+    kubernetes.operator.savepoint.history.max.count: "10"
+  jobManager:
+    replicas: 1
+    resource:
+      memory: 4096m
+      cpu: 2
+  taskManager:
+    replicas: 12
+    resource:
+      memory: 16384m
+      cpu: 4
+  podTemplate:
+    spec:
+      containers:
+        - name: flink-main-container
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: adtech-kafka-kafka-bootstrap:9092
+            - name: CLICKHOUSE_SHARDS
+              # shard order must match remote_servers (operator: chi-<chi>-<cluster>-<shard>-<replica>)
+              value: >-
+                http://chi-adtech-adtech-0-0:8123,http://chi-adtech-adtech-0-1:8123;
+                http://chi-adtech-adtech-1-0:8123,http://chi-adtech-adtech-1-1:8123;
+                http://chi-adtech-adtech-2-0:8123,http://chi-adtech-adtech-2-1:8123;
+                http://chi-adtech-adtech-3-0:8123,http://chi-adtech-adtech-3-1:8123
+            - name: CLICKHOUSE_USER
+              value: adtech
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clickhouse-credentials
+                  key: password
+            - name: SINK_WRITERS_PER_SHARD
+              value: "2"
+  job:
+    jarURI: local:///opt/flink/usrlib/adtech-flink-job.jar
+    entryClass: com.example.adtech.AdAnalyticsJob
+    parallelism: 48
+    upgradeMode: savepoint
+    state: running

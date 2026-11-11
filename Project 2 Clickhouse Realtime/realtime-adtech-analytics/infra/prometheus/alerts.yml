@@ -1,0 +1,50 @@
+groups:
+  - name: adtech-pipeline
+    rules:
+      - alert: KafkaConsumerLagHigh
+        expr: sum(kafka_consumergroup_lag{consumergroup="flink-adtech", topic="ad.events"}) > 5000000
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Flink is more than 5M events behind on ad.events"
+          description: "Check back-pressure and ClickHouse insert latency (Pipeline Health dashboard)."
+
+      - alert: FlinkCheckpointsFailing
+        expr: increase(flink_jobmanager_job_numberOfFailedCheckpoints[15m]) > 2
+        labels: {severity: critical}
+        annotations:
+          summary: "Flink checkpoints are failing"
+          description: "Sinks flush on checkpoints; failing checkpoints mean growing replay on restart."
+
+      - alert: DeadLetterRateHigh
+        expr: |
+          sum(rate(flink_taskmanager_job_task_operator_adtech_invalidEvents[5m]))
+            / clamp_min(sum(rate(flink_taskmanager_job_task_operator_adtech_validEvents[5m])), 1) > 0.02
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 2% of events are rejected to the DLQ"
+          description: "Likely an upstream schema change. Inspect adtech.dead_letters by error_type."
+
+      - alert: ClickHouseTooManyParts
+        expr: max(ClickHouseAsyncMetrics_MaxPartCountForPartition) > 200
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "A partition has more than 200 parts (inserts are delayed at 300)"
+          description: "Inserts are too small or too frequent, or merges are starved. Check sink batch size."
+
+      - alert: ClickHouseReplicationLag
+        expr: max(ClickHouseAsyncMetrics_ReplicasMaxAbsoluteDelay) > 300
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "A ClickHouse replica is more than 5 minutes behind"
+
+      - alert: ClickHouseInsertRetries
+        expr: sum(rate(flink_taskmanager_job_task_operator_clickhouse_insertRetries[5m])) > 0.1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "ClickHouse inserts are being retried regularly"
+          description: "A replica may be unhealthy; the sink is failing over between replicas."

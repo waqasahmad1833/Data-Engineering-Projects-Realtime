@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  flink-job:
+    name: Flink job (Java 11)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+          cache: maven
+      - run: mvn -B -f flink-job/pom.xml verify
+
+  generator:
+    name: Generator (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r generator/requirements-dev.txt
+      - run: pytest -q
+        working-directory: generator
+
+  sql:
+    name: ClickHouse SQL (embedded engine)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install chdb
+      - run: python scripts/validate_sql.py
+      - name: Dashboards are up to date
+        run: python scripts/build_dashboards.py && git diff --exit-code infra/grafana/dashboards
+
+  compose:
+    name: Validate docker-compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env && docker compose config -q
